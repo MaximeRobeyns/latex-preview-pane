@@ -81,20 +81,24 @@
 (defun init-latex-preview-pane ()
   "Starts the latex-preview-pane.
 Init procedure:
-1. Find a window with doc-view-mode enabled in this frame.
-2. If no such window can be found, split this window vertically,
-   and display startup message.
+1. If using an external viewer, open the pdf immediately
+2. If not,
+   2.1. Find a window with doc-view-mode enabled in this frame.
+   2.2. If no such window can be found, split this window vertically,
+        and display startup message.
 3. Start the refresh loop for the current file.
 "
   (progn
     ;; make sure the current window isn't the preview pane
     (set-window-parameter nil 'is-latex-preview-pane nil)
-    (if (eq (lpp/window-containing-preview) nil)
-        ;; tag the newly created window
-        (set-window-parameter
-         (if latex-preview-pane-use-frame (car (window-list (make-frame)))
-           (split-window nil nil preview-orientation))
-         'is-latex-preview-pane t))
+    (if (not latex-preview-pane-use-external-viewer)
+        (if (eq (lpp/window-containing-preview) nil)
+            ;; tag the newly created window
+            (set-window-parameter
+             (if latex-preview-pane-use-frame (car (window-list (make-frame)))
+               (split-window nil nil preview-orientation))
+             'is-latex-preview-pane t)))
+
     (lpp/display-startup (lpp/window-containing-preview))
 
     ;; add the save hook
@@ -113,11 +117,16 @@ Init procedure:
   "Show the startup message in a new buffer, while keeping focus on current"
   (let ((old-buff (current-buffer)))
     (progn
-      (set-window-buffer where (get-buffer-create "*Latex Preview Pane Welcome*"))
-      (set-buffer (get-buffer "*Latex Preview Pane Welcome*"))
-      (erase-buffer)
-      (insert  message-latex-preview-pane-welcome)
-      (set-buffer old-buff))))
+      (if latex-preview-pane-use-external-viewer
+          ;; open the pdf in an external viewer
+          (let ((pdf-file
+                 (replace-regexp-in-string "\.tex$" ".pdf" (lpp/buffer-file-name))))
+            (start-process "External Preview" nil "xdg-open" pdf-file))
+        ((set-window-buffer where (get-buffer-create "*Latex Preview Pane Welcome*"))
+         (set-buffer (get-buffer "*Latex Preview Pane Welcome*"))
+         (erase-buffer)
+         (insert  message-latex-preview-pane-welcome)
+         (set-buffer old-buff))))))
 
 (defvar lpp/view-buffer-command
   (pcase system-type
@@ -150,21 +159,22 @@ Init procedure:
   "Updates the preview pane on save if it is already open"
   (interactive)
   (when  (and (boundp 'latex-preview-pane-mode) latex-preview-pane-mode)
-    (if (eq (lpp/window-containing-preview) nil)
-        (init-latex-preview-pane)
-      (progn
-        ;; if a pdf-tools preview buffer already exists
-        ;; 1. erase it
-        (if (not (eq (get-buffer "*pdflatex-buffer*") nil))
-            (let ((old-buff (current-buffer)))
+    (progn (if (and (eq latex-preview-pane-use-external-viewer nil)
+                     (eq (lpp/window-containing-preview) nil))
+                (init-latex-preview-pane)
               (progn
-                (set-buffer "*pdflatex-buffer*")
-                (erase-buffer)
-                (set-buffer old-buff))))
-        ;; 2. let user know we're compiling
-        (message "Updating LaTeX Preview Pane")
-        ;; 3. do the compiling
-        (latex-preview-pane-update-p)))))
+                ;; if a pdf-tools preview buffer already exists
+                ;; 1. erase it
+                (if (not (eq (get-buffer "*pdflatex-buffer*") nil))
+                    (let ((old-buff (current-buffer)))
+                      (progn
+                        (set-buffer "*pdflatex-buffer*")
+                        (erase-buffer)
+                        (set-buffer old-buff))))))
+           ;; 2. let user know we're compiling
+           (message "Updating LaTeX Preview Pane")
+           ;; 3. do the compiling
+           (latex-preview-pane-update-p))))
 
 (defun lpp/last-backtrace ()
   (let ((old-buff (current-buffer)))
@@ -267,6 +277,8 @@ Init procedure:
        (default-directory
          (file-name-directory
           (expand-file-name (lpp/buffer-file-name)))))
+    ;; TODO add support for starting the latex compliation as a background
+    ;; process so as to not hang up emacs
     (if use-latexmk
         (call-process "latexmk" nil "*pdflatex-buffer*" nil buff "-pdf" "-interaction=nonstopmode")
       (if shell-escape-mode
@@ -292,15 +304,16 @@ Init procedure:
             (buffer-name (get-file-buffer (lpp/buffer-file-name))))))
       ;; remove any error overlays
       (remove-overlays)
-      ;; if the file doesn't exist, say that the file isn't available due to error messages
-      (if (file-exists-p pdf-filename)
-          (if (eq (get-buffer pdf-buff-name) nil)
-              (let ((pdf-buff (find-file-noselect pdf-filename 'nowarn)))
-                (buffer-disable-undo pdf-buff)
-                (set-window-buffer (lpp/window-containing-preview) pdf-buff))
-            (progn
-              (set-window-buffer (lpp/window-containing-preview) pdf-buff-name)
-              (with-current-buffer pdf-buff-name (doc-view-revert-buffer nil t))))))))
+      (if (not latex-preview-pane-use-external-viewer)
+        ;; if the file doesn't exist, say that the file isn't available due to error messages
+        (if (file-exists-p pdf-filename)
+            (if (eq (get-buffer pdf-buff-name) nil)
+                (let ((pdf-buff (find-file-noselect pdf-filename 'nowarn)))
+                  (buffer-disable-undo pdf-buff)
+                  (set-window-buffer (lpp/window-containing-preview) pdf-buff))
+              (progn
+                (set-window-buffer (lpp/window-containing-preview) pdf-buff-name)
+                (with-current-buffer pdf-buff-name (doc-view-revert-buffer nil t)))))))))
 
 ;;
 ;; Mode definition
@@ -412,6 +425,11 @@ Init procedure:
 
 (defcustom latex-preview-pane-use-frame nil
   "If set, LaTeX Preview Pane will show preview in a new frame"
+  :type 'boolean
+  :group 'latex-preview-pane)
+
+(defcustom latex-review-pane-use-external-viewer nil
+  "If set, LaTeX Preview Pane will use the system pdf viewer for previews"
   :type 'boolean
   :group 'latex-preview-pane)
 
